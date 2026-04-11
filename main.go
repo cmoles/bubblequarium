@@ -97,6 +97,15 @@ type model struct {
 	showHelp      bool
 }
 
+// aquaHeight returns the number of rows available for the aquarium (excluding status bars).
+func (m model) aquaHeight() int {
+	h := m.height - 2
+	if h < 6 {
+		h = 6
+	}
+	return h
+}
+
 func initialModel() model {
 	m := model{
 		width:  80,
@@ -105,7 +114,7 @@ func initialModel() model {
 	}
 	// Start with some fish
 	for i := 0; i < 6; i++ {
-		m.fish = append(m.fish, newFish(m.width, m.height))
+		m.fish = append(m.fish, newFish(m.width, m.aquaHeight()))
 	}
 	return m
 }
@@ -120,7 +129,7 @@ func newFish(width, height int) Fish {
 		x = 0
 	}
 	// Keep fish in the water area (not in sand/decorations at bottom)
-	waterHeight := height - 5
+	waterHeight := height - 3
 	if waterHeight < 3 {
 		waterHeight = 3
 	}
@@ -152,7 +161,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		case "q", "ctrl+c":
 			return m, tea.Quit
 		case "f":
-			m.fish = append(m.fish, newFish(m.width, m.height))
+			m.fish = append(m.fish, newFish(m.width, m.aquaHeight()))
 		case "r":
 			if len(m.fish) > 0 {
 				m.fish = m.fish[:len(m.fish)-1]
@@ -181,7 +190,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			if rand.Float64() < 0.15 {
 				bx := float64(rand.Intn(m.width))
 				m.bubbles = append(m.bubbles, Bubble{
-					x: bx, y: float64(m.height - 4),
+					x: bx, y: float64(m.aquaHeight() - 3),
 					speed: 0.3 + rand.Float64()*0.3,
 					char:  []string{"°", "o", "O", "·"}[rand.Intn(4)],
 				})
@@ -193,7 +202,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 }
 
 func (m model) updateFish() model {
-	waterHeight := m.height - 5
+	waterHeight := m.aquaHeight() - 3
 	if waterHeight < 3 {
 		waterHeight = 3
 	}
@@ -292,7 +301,7 @@ func (m model) updateBubbles() model {
 
 func (m model) updateFood() model {
 	newFood := make([]FoodParticle, 0, len(m.food))
-	bottomY := float64(m.height - 5)
+	bottomY := float64(m.aquaHeight() - 3)
 	for _, f := range m.food {
 		f.life--
 		if f.y < bottomY {
@@ -325,12 +334,11 @@ func (m model) View() string {
 		return "Terminal too small!"
 	}
 
-	// Build the screen buffer
-	waterColor := lipgloss.Color("#1a3a5c")
-	_ = waterColor
+	// Build the screen buffer (reserve 2 rows for status bars)
+	aquaHeight := m.aquaHeight()
 
-	buf := make([][]rune, m.height)
-	colors := make([][]lipgloss.Color, m.height)
+	buf := make([][]rune, aquaHeight)
+	colors := make([][]lipgloss.Color, aquaHeight)
 	for i := range buf {
 		buf[i] = make([]rune, m.width)
 		colors[i] = make([]lipgloss.Color, m.width)
@@ -340,7 +348,7 @@ func (m model) View() string {
 		}
 	}
 
-	bottomStart := m.height - 4
+	bottomStart := aquaHeight - 2
 
 	// Draw water background with subtle waves
 	for y := 0; y < bottomStart; y++ {
@@ -362,7 +370,7 @@ func (m model) View() string {
 	}
 
 	// Draw sand bottom
-	for y := bottomStart; y < m.height-1; y++ {
+	for y := bottomStart; y < aquaHeight; y++ {
 		for x := 0; x < m.width; x++ {
 			sandChars := []rune{'░', '▒', '░', '·', '░'}
 			idx := (x + y) % len(sandChars)
@@ -381,7 +389,7 @@ func (m model) View() string {
 		if m.tick%20 < 10 { // sway
 			for py := 0; py < plantHeight; py++ {
 				row := bottomStart - 1 - py
-				if row > 0 && row < m.height && px < m.width {
+				if row > 0 && row < aquaHeight && px < m.width {
 					sway := 0
 					if py > 1 && m.tick%20 < 5 {
 						sway = 1
@@ -402,7 +410,7 @@ func (m model) View() string {
 		} else {
 			for py := 0; py < plantHeight; py++ {
 				row := bottomStart - 1 - py
-				if row > 0 && row < m.height && px < m.width {
+				if row > 0 && row < aquaHeight && px < m.width {
 					if py == plantHeight-1 {
 						buf[row][px] = '❀'
 						colors[row][px] = lipgloss.Color("#FF6B9D")
@@ -430,7 +438,7 @@ func (m model) View() string {
 	for _, d := range decoPositions {
 		if d.x < m.width {
 			row := bottomStart
-			if row < m.height {
+			if row < aquaHeight {
 				buf[row][d.x] = d.char
 				colors[row][d.x] = d.col
 			}
@@ -463,7 +471,7 @@ func (m model) View() string {
 			for dx, ch := range []rune(line) {
 				ry := castleRow - len(castle) + 1 + dy
 				rx := castleX + dx
-				if ry > 0 && ry < m.height && rx >= 0 && rx < m.width {
+				if ry > 0 && ry < aquaHeight && rx >= 0 && rx < m.width {
 					buf[ry][rx] = ch
 					colors[ry][rx] = lipgloss.Color("#B8860B")
 				}
@@ -474,7 +482,7 @@ func (m model) View() string {
 	// Draw bubbles
 	for _, b := range m.bubbles {
 		bx, by := int(b.x), int(b.y)
-		if bx >= 0 && bx < m.width && by >= 0 && by < m.height-1 {
+		if bx >= 0 && bx < m.width && by >= 0 && by < aquaHeight {
 			for _, r := range b.char {
 				buf[by][bx] = r
 				colors[by][bx] = lipgloss.Color("#87CEEB")
@@ -486,7 +494,7 @@ func (m model) View() string {
 	// Draw food
 	for _, f := range m.food {
 		fx, fy := int(f.x), int(f.y)
-		if fx >= 0 && fx < m.width && fy >= 0 && fy < m.height-1 {
+		if fx >= 0 && fx < m.width && fy >= 0 && fy < aquaHeight {
 			buf[fy][fx] = '•'
 			colors[fy][fx] = lipgloss.Color("#FFA500")
 		}
@@ -505,7 +513,7 @@ func (m model) View() string {
 		if fy < 1 {
 			fy = 1
 		}
-		if fy >= m.height-1 {
+		if fy >= aquaHeight-1 {
 			continue
 		}
 		lines := strings.Split(art, "\n")
@@ -513,7 +521,7 @@ func (m model) View() string {
 			ry := fy + dy
 			for i, ch := range []rune(line) {
 				cx := fx + i
-				if cx >= 0 && cx < m.width && ry > 0 && ry < m.height-4 {
+				if cx >= 0 && cx < m.width && ry > 0 && ry < aquaHeight-2 {
 					buf[ry][cx] = ch
 					colors[ry][cx] = f.species.color
 				}
@@ -523,7 +531,7 @@ func (m model) View() string {
 
 	// Render buffer to string
 	var sb strings.Builder
-	for y := 0; y < m.height-1; y++ {
+	for y := 0; y < aquaHeight; y++ {
 		for x := 0; x < m.width; x++ {
 			ch := string(buf[y][x])
 			c := colors[y][x]
@@ -536,9 +544,7 @@ func (m model) View() string {
 				sb.WriteString(style.Render(ch))
 			}
 		}
-		if y < m.height-2 {
-			sb.WriteString("\n")
-		}
+		sb.WriteString("\n")
 	}
 
 	// Status bar
@@ -548,12 +554,19 @@ func (m model) View() string {
 		Bold(true).
 		Width(m.width)
 
-	status := fmt.Sprintf(" 🐟%d | F:🐠+ R:🐠- Space:🍞 P:⏸ ?:❓ Q:🚪", len(m.fish))
+	now := time.Now()
+	clock := now.Format("3:04:05 PM")
+	date := now.Format("Mon Jan 2, 2006")
+	clockLine := fmt.Sprintf(" 📅 %s  🕐 %s", date, clock)
 	if m.paused {
-		status += "  ⏸ PAUSED"
+		clockLine += "  ⏸ PAUSED"
 	}
+
+	controlsLine := fmt.Sprintf(" 🐟%d | F:🐠+ R:🐠- Space:🍞 P:⏸ ?:❓ Q:🚪", len(m.fish))
+
+	sb.WriteString(statusStyle.Render(clockLine))
 	sb.WriteString("\n")
-	sb.WriteString(statusStyle.Render(status))
+	sb.WriteString(statusStyle.Render(controlsLine))
 
 	// Help overlay
 	if m.showHelp {
