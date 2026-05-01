@@ -2,6 +2,7 @@ package main
 
 import (
 	"fmt"
+	"math"
 	"math/rand"
 	"strings"
 	"time"
@@ -48,13 +49,6 @@ var species = []Species{
 		speed:       0.5,
 		name:        "Betta",
 	},
-	// {
-	// 	rightFrames: []string{">=<", ">=-<"},
-	// 	leftFrames:  []string{"<=>", "<-=>"},
-	// 	color:       lipgloss.Color("#7CFC00"),
-	// 	speed:       2.0,
-	// 	name:        "Guppy",
-	// },
 	{
 		rightFrames: []string{"/\\oo/\\\n//////", "/\\oo/\\\n||||||"},
 		leftFrames:  []string{"/\\oo/\\\n\\\\\\\\\\\\", "/\\oo/\\\n||||||"},
@@ -97,9 +91,9 @@ type model struct {
 	showHelp      bool
 }
 
-// aquaHeight returns the number of rows available for the aquarium (excluding status bars).
+// aquaHeight returns the number of rows available for the aquarium (excluding the status bar).
 func (m model) aquaHeight() int {
-	h := m.height - 2
+	h := m.height - 1
 	if h < 6 {
 		h = 6
 	}
@@ -218,7 +212,7 @@ func (m model) updateFish() model {
 
 		// Wobble vertically
 		f.wobbleSin += 0.1
-		f.wobbleY = 0.5 * float64(sinApprox(f.wobbleSin))
+		f.wobbleY = 0.5 * math.Sin(f.wobbleSin)
 
 		// Check if fish is attracted to food
 		for i := range m.food {
@@ -315,18 +309,51 @@ func (m model) updateFood() model {
 	return m
 }
 
-func sinApprox(x float64) float64 {
-	// Simple sin approximation
-	for x > 6.28 {
-		x -= 6.28
+// cellWidth returns the number of terminal cells s occupies, pessimistically
+// counting every non-ASCII rune as 2 cells. That matches how most modern
+// terminals (Windows Terminal, iTerm2, etc.) render emoji.
+func cellWidth(s string) int {
+	w := 0
+	for _, r := range s {
+		if r < 0x80 {
+			w++
+		} else {
+			w += 2
+		}
 	}
-	for x < 0 {
-		x += 6.28
+	return w
+}
+
+// fitToWidth truncates or pads s so it occupies exactly width terminal cells.
+func fitToWidth(s string, width int) string {
+	var b strings.Builder
+	used := 0
+	for _, r := range s {
+		rw := 1
+		if r >= 0x80 {
+			rw = 2
+		}
+		if used+rw > width {
+			break
+		}
+		b.WriteRune(r)
+		used += rw
 	}
-	if x < 3.14 {
-		return 1.0 - (x-1.57)*(x-1.57)/2.5
+	if used < width {
+		b.WriteString(strings.Repeat(" ", width-used))
 	}
-	return -1.0 + (x-4.71)*(x-4.71)/2.5
+	return b.String()
+}
+
+// pickStatusLine returns the richest candidate that fits in width cells,
+// falling back to the most compact one (which fitToWidth will then truncate).
+func pickStatusLine(candidates []string, width int) string {
+	for _, c := range candidates {
+		if cellWidth(c) <= width {
+			return c
+		}
+	}
+	return candidates[len(candidates)-1]
 }
 
 func (m model) View() string {
@@ -551,22 +578,29 @@ func (m model) View() string {
 	statusStyle := lipgloss.NewStyle().
 		Background(lipgloss.Color("#1a1a2e")).
 		Foreground(lipgloss.Color("#e0e0e0")).
-		Bold(true).
-		Width(m.width)
+		Bold(true)
 
 	now := time.Now()
-	clock := now.Format("3:04:05 PM")
-	date := now.Format("Mon Jan 2, 2006")
-	clockLine := fmt.Sprintf(" 📅 %s  🕐 %s", date, clock)
-	if m.paused {
-		clockLine += "  ⏸ PAUSED"
-	}
+	n := len(m.fish)
+	fullClock := now.Format("3:04:05 PM")
+	shortClock := now.Format("3:04 PM")
+	miniClock := now.Format("15:04")
+	fullDate := now.Format("Mon Jan 2, 2006")
+	medDate := now.Format("Jan 2, 2006")
+	shortDate := now.Format("Jan 2")
 
-	controlsLine := fmt.Sprintf(" 🐟%d | F:🐠+ R:🐠- Space:🍞 P:⏸ ?:❓ Q:🚪", len(m.fish))
+	// Richest to most compact. The first that fits in m.width wins.
+	statusLine := pickStatusLine([]string{
+		fmt.Sprintf(" 🐟%d  🕐 %s  📅 %s  ?:❓", n, fullClock, fullDate),
+		fmt.Sprintf(" %d fish  %s  %s  ?", n, fullClock, fullDate),
+		fmt.Sprintf(" %d fish  %s  %s  ?", n, shortClock, medDate),
+		fmt.Sprintf(" %d fish  %s  %s  ?", n, shortClock, shortDate),
+		fmt.Sprintf(" %df  %s  %s  ?", n, shortClock, shortDate),
+		fmt.Sprintf(" %df %s ?", n, miniClock),
+	}, m.width)
+	statusLine = fitToWidth(statusLine, m.width)
 
-	sb.WriteString(statusStyle.Render(clockLine))
-	sb.WriteString("\n")
-	sb.WriteString(statusStyle.Render(controlsLine))
+	sb.WriteString(statusStyle.Render(statusLine))
 
 	// Help overlay
 	if m.showHelp {
@@ -577,7 +611,7 @@ func (m model) View() string {
 			Background(lipgloss.Color("#1a1a2e")).
 			Foreground(lipgloss.Color("#e0e0e0")).
 			Render(
-				"🐠 Fun Aquarium 🐠\n\n" +
+				"🐠 bubblequarium 🐠\n\n" +
 					"F     - Add a fish\n" +
 					"R     - Remove a fish\n" +
 					"Space - Drop food\n" +
@@ -594,7 +628,6 @@ func (m model) View() string {
 }
 
 func main() {
-	rand.Seed(time.Now().UnixNano())
 	p := tea.NewProgram(
 		initialModel(),
 		tea.WithAltScreen(),
