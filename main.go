@@ -68,10 +68,56 @@ type Fish struct {
 	wobbleSin float64
 }
 
+type Submarine struct {
+	x, y       float64
+	vx, vy     float64
+	goingLeft  bool
+	colorIdx   int
+	headlight  bool
+	armOut     bool
+	armLen     int
+	armHold    int
+	trail      bool
+	hornFrames int
+}
+
+var subColors = []lipgloss.Color{
+	"#FFD700", // gold
+	"#FF7F50", // coral
+	"#00CED1", // turquoise
+	"#FF1493", // hot pink
+	"#9370DB", // purple
+	"#7CFC00", // lime
+	"#C0C0C0", // silver
+}
+
+const subRightArt = `     ___
+   _/___\_
+  (o o o o)>
+   \_____/  `
+
+const subLeftArt = `     ___
+   _/___\_
+ <(o o o o)
+   \_____/  `
+
+const (
+	subWidth         = 12
+	subArmMaxLen     = 8   // cells the grabber arm extends to
+	subIdleThreshold = 30  // ticks (~3 s) of no input before autopilot kicks in
+	subWrapMargin    = 8   // cells past edge before wrap-around triggers
+	subImpulse       = 0.6 // velocity bump per arrow press
+	subBoostImpulse  = 1.5 // velocity bump per shift+arrow press
+	subDrag          = 0.90
+	subMinDrift      = 0.15
+	subMaxSpeed      = 2.5
+)
+
 type Bubble struct {
 	x, y  float64
 	speed float64
 	char  string
+	color lipgloss.Color // optional override; empty = default light blue
 }
 
 type FoodParticle struct {
@@ -87,6 +133,8 @@ type model struct {
 	fish            []Fish
 	bubbles         []Bubble
 	food            []FoodParticle
+	sub             Submarine
+	lastInputTick   int
 	tick            int
 	paused          bool
 	showHelp        bool
@@ -113,6 +161,13 @@ func initialModel() model {
 	// Start with some fish
 	for i := 0; i < 6; i++ {
 		m.fish = append(m.fish, newFish(m.width, m.aquaHeight()))
+	}
+	m.sub = Submarine{
+		x:         float64(m.width/2 - subWidth/2),
+		y:         float64(m.aquaHeight() / 3),
+		vx:        0.2,
+		goingLeft: false,
+		colorIdx:  0,
 	}
 	if b := firstUsableBattery(); b != nil {
 		m.hasBattery = true
@@ -175,6 +230,7 @@ func (m model) Init() tea.Cmd {
 func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	switch msg := msg.(type) {
 	case tea.KeyMsg:
+		m.lastInputTick = m.tick
 		switch msg.String() {
 		case "q", "ctrl+c":
 			return m, tea.Quit
@@ -192,6 +248,32 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.paused = !m.paused
 		case "?":
 			m.showHelp = !m.showHelp
+		case "left", "a", "h":
+			m = m.nudgeSub(-subImpulse, 0)
+		case "right", "d", "l":
+			m = m.nudgeSub(subImpulse, 0)
+		case "up", "w", "k":
+			m = m.nudgeSub(0, -subImpulse)
+		case "down", "s", "j":
+			m = m.nudgeSub(0, subImpulse)
+		case "shift+left", "A", "H":
+			m = m.nudgeSub(-subBoostImpulse, 0)
+		case "shift+right", "D", "L":
+			m = m.nudgeSub(subBoostImpulse, 0)
+		case "shift+up", "W", "K":
+			m = m.nudgeSub(0, -subBoostImpulse)
+		case "shift+down", "S", "J":
+			m = m.nudgeSub(0, subBoostImpulse)
+		case "c":
+			m.sub.colorIdx = (m.sub.colorIdx + 1) % len(subColors)
+		case "z":
+			m.sub.headlight = !m.sub.headlight
+		case "e":
+			m.sub.armOut = !m.sub.armOut
+		case "t":
+			m.sub.trail = !m.sub.trail
+		case "x":
+			m.sub.hornFrames = 15
 		}
 
 	case tea.WindowSizeMsg:
@@ -209,6 +291,53 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m = m.updateFish()
 			m = m.updateBubbles()
 			m = m.updateFood()
+			m = m.updateSubmarine()
+			// Animate arm extend/retract one cell per tick.
+			target := 0
+			if m.sub.armOut {
+				target = subArmMaxLen
+			}
+			if m.sub.armLen < target {
+				m.sub.armLen++
+			} else if m.sub.armLen > target {
+				m.sub.armLen--
+			}
+			// Auto-recall after a brief hold at full extension.
+			if m.sub.armOut && m.sub.armLen >= subArmMaxLen {
+				m.sub.armHold++
+				if m.sub.armHold >= 5 {
+					m.sub.armOut = false
+					m.sub.armHold = 0
+				}
+			} else if !m.sub.armOut {
+				m.sub.armHold = 0
+			}
+			// Catch fish near the tip while the arm is out.
+			if m.sub.armLen > 0 {
+				m = m.catchFish()
+			}
+			if m.sub.hornFrames > 0 {
+				m = m.scatterFish()
+				m.sub.hornFrames--
+			}
+			// Submarine bubble trail
+			if m.sub.trail && (math.Abs(m.sub.vx)+math.Abs(m.sub.vy)) > 0.05 && m.tick%2 == 0 {
+				var bx float64
+				if m.sub.goingLeft {
+					bx = m.sub.x + float64(subWidth)
+				} else {
+					bx = m.sub.x - 1
+				}
+				by := m.sub.y + 2
+				if bx >= 0 && bx < float64(m.width) && by >= 0 && by < float64(m.aquaHeight()-3) {
+					m.bubbles = append(m.bubbles, Bubble{
+						x: bx, y: by,
+						speed: 0.25 + rand.Float64()*0.2,
+						char:  []string{"O", "o", "○"}[rand.Intn(3)],
+						color: subColors[m.sub.colorIdx%len(subColors)],
+					})
+				}
+			}
 			// Random bubbles from bottom
 			if rand.Float64() < 0.15 {
 				bx := float64(rand.Intn(m.width))
@@ -335,6 +464,146 @@ func (m model) updateFood() model {
 		}
 	}
 	m.food = newFood
+	return m
+}
+
+func (m model) nudgeSub(dx, dy float64) model {
+	s := m.sub
+	s.vx += dx
+	s.vy += dy
+	if s.vx > subMaxSpeed {
+		s.vx = subMaxSpeed
+	} else if s.vx < -subMaxSpeed {
+		s.vx = -subMaxSpeed
+	}
+	if s.vy > subMaxSpeed {
+		s.vy = subMaxSpeed
+	} else if s.vy < -subMaxSpeed {
+		s.vy = -subMaxSpeed
+	}
+	m.sub = s
+	return m
+}
+
+func (m model) updateSubmarine() model {
+	s := m.sub
+	idle := m.tick-m.lastInputTick > subIdleThreshold
+	inView := s.x > -float64(subWidth) && s.x < float64(m.width)
+
+	if idle {
+		if inView {
+			// Maintain a small drift in the current facing direction.
+			if math.Abs(s.vx) < subMinDrift {
+				if s.goingLeft {
+					s.vx = -subMinDrift
+				} else {
+					s.vx = subMinDrift
+				}
+			}
+			// Bounce off horizontal edges so it stays in view.
+			if s.x <= 0 && s.vx < 0 {
+				s.vx = -s.vx
+			}
+			if s.x+float64(subWidth) >= float64(m.width) && s.vx > 0 {
+				s.vx = -s.vx
+			}
+			// Damp vertical drift toward zero.
+			s.vy *= 0.9
+		} else {
+			// Off-screen: halt so it stays out of view until the user acts.
+			s.vx *= 0.85
+			s.vy *= 0.85
+			if math.Abs(s.vx) < 0.02 {
+				s.vx = 0
+			}
+			if math.Abs(s.vy) < 0.02 {
+				s.vy = 0
+			}
+		}
+	} else {
+		// Active: gentle drag so the sub coasts but eventually settles.
+		s.vx *= subDrag
+		s.vy *= subDrag
+	}
+
+	// Apply velocity.
+	s.x += s.vx
+	s.y += s.vy
+
+	// Update facing based on horizontal velocity.
+	if s.vx > 0.05 {
+		s.goingLeft = false
+	} else if s.vx < -0.05 {
+		s.goingLeft = true
+	}
+
+	// Vertical clamp to keep sub in the water column.
+	minY := 1.0
+	maxY := float64(m.aquaHeight() - 6)
+	if maxY < minY {
+		maxY = minY
+	}
+	if s.y < minY {
+		s.y = minY
+		if s.vy < 0 {
+			s.vy = 0
+		}
+	}
+	if s.y > maxY {
+		s.y = maxY
+		if s.vy > 0 {
+			s.vy = 0
+		}
+	}
+
+	// Wrap-around once pushed far enough past either edge.
+	if s.x < -float64(subWidth+subWrapMargin) {
+		s.x = float64(m.width)
+	} else if s.x > float64(m.width+subWrapMargin) {
+		s.x = -float64(subWidth)
+	}
+
+	m.sub = s
+	return m
+}
+
+func (m model) catchFish() model {
+	var tipX float64
+	if m.sub.goingLeft {
+		tipX = m.sub.x - float64(m.sub.armLen)
+	} else {
+		tipX = m.sub.x + float64(subWidth) + float64(m.sub.armLen) - 1
+	}
+	tipY := m.sub.y + 2
+	kept := m.fish[:0]
+	for _, f := range m.fish {
+		dx := f.x - tipX
+		dy := f.y - tipY
+		if dx*dx+dy*dy < 4 { // capture radius ~2
+			continue // caught — drop it
+		}
+		kept = append(kept, f)
+	}
+	m.fish = kept
+	return m
+}
+
+func (m model) scatterFish() model {
+	sx := m.sub.x + float64(subWidth)/2
+	sy := m.sub.y + 2
+	for i := range m.fish {
+		f := &m.fish[i]
+		dx := f.x - sx
+		dy := f.y - sy
+		if dx*dx+dy*dy < 144 { // radius 12
+			f.goingLeft = dx < 0
+			if dx >= 0 {
+				f.x += 0.5
+			} else {
+				f.x -= 0.5
+			}
+		}
+	}
 	return m
 }
 
@@ -541,7 +810,11 @@ func (m model) View() string {
 		if bx >= 0 && bx < m.width && by >= 0 && by < aquaHeight {
 			for _, r := range b.char {
 				buf[by][bx] = r
-				colors[by][bx] = lipgloss.Color("#87CEEB")
+				if b.color != "" {
+					colors[by][bx] = b.color
+				} else {
+					colors[by][bx] = lipgloss.Color("#87CEEB")
+				}
 				break
 			}
 		}
@@ -580,6 +853,124 @@ func (m model) View() string {
 				if cx >= 0 && cx < m.width && ry > 0 && ry < aquaHeight-2 {
 					buf[ry][cx] = ch
 					colors[ry][cx] = f.species.color
+				}
+			}
+		}
+	}
+
+	// Draw submarine (on top of fish)
+	{
+		var art string
+		if m.sub.goingLeft {
+			art = subLeftArt
+		} else {
+			art = subRightArt
+		}
+		sx := int(m.sub.x)
+		sy := int(m.sub.y)
+		subColor := subColors[m.sub.colorIdx%len(subColors)]
+		for dy, line := range strings.Split(art, "\n") {
+			runes := []rune(line)
+			// Find the hull span on this row so internal spaces (e.g. between
+			// portholes) become opaque hull instead of letting the castle/water
+			// show through.
+			first, last := -1, -1
+			for i, ch := range runes {
+				if ch != ' ' {
+					if first == -1 {
+						first = i
+					}
+					last = i
+				}
+			}
+			ry := sy + dy
+			for dx, ch := range runes {
+				cx := sx + dx
+				if cx < 0 || cx >= m.width || ry <= 0 || ry >= aquaHeight-2 {
+					continue
+				}
+				if ch != ' ' {
+					buf[ry][cx] = ch
+					colors[ry][cx] = subColor
+				} else if first != -1 && dx > first && dx < last {
+					buf[ry][cx] = ' '
+					colors[ry][cx] = subColor
+				}
+			}
+		}
+		// Headlight: re-light cells in a cone in front of the sub. Existing
+		// chars (fish, plants, etc.) get repainted bright white; empty water
+		// gets a soft glow particle so the beam shape is visible.
+		if m.sub.headlight {
+			centerY := sy + 2
+			var sign, base int
+			if m.sub.goingLeft {
+				sign = -1
+				base = sx - 1
+			} else {
+				sign = 1
+				base = sx + subWidth
+			}
+			litObj := lipgloss.Color("#FFFFFF")
+			litGlow := lipgloss.Color("#F0E68C")
+			beamLen := 18
+			for i := 0; i < beamLen; i++ {
+				cx := base + sign*i
+				if cx < 0 || cx >= m.width {
+					continue
+				}
+				half := i / 3
+				if half > 2 {
+					half = 2
+				}
+				for dy := -half; dy <= half; dy++ {
+					ry := centerY + dy
+					if ry <= 0 || ry >= aquaHeight-2 {
+						continue
+					}
+					if buf[ry][cx] == ' ' {
+						buf[ry][cx] = '·'
+						colors[ry][cx] = litGlow
+					} else {
+						colors[ry][cx] = litObj
+					}
+				}
+			}
+		}
+		// Grabber arm
+		if m.sub.armLen > 0 {
+			armY := sy + 2
+			var sign, base int
+			if m.sub.goingLeft {
+				sign = -1
+				base = sx - 1
+			} else {
+				sign = 1
+				base = sx + subWidth
+			}
+			armColor := lipgloss.Color("#C0C0C0")
+			tipColor := lipgloss.Color("#E0E0E0")
+			for i := 0; i < m.sub.armLen; i++ {
+				cx := base + sign*i
+				if cx < 0 || cx >= m.width || armY <= 0 || armY >= aquaHeight-2 {
+					continue
+				}
+				if i == m.sub.armLen-1 {
+					buf[armY][cx] = 'O'
+					colors[armY][cx] = tipColor
+				} else {
+					buf[armY][cx] = '═'
+					colors[armY][cx] = armColor
+				}
+			}
+		}
+		// Horn glyphs
+		if m.sub.hornFrames > 0 {
+			glyphY := sy - 1
+			for _, gx := range []int{sx + 3, sx + 7} {
+				if gx >= 0 && gx < m.width && glyphY > 0 && glyphY < aquaHeight-2 {
+					buf[glyphY][gx] = '♪'
+					colors[glyphY][gx] = lipgloss.Color("#FFEB3B")
 				}
 			}
 		}
@@ -652,11 +1043,18 @@ func (m model) View() string {
 			Foreground(lipgloss.Color("#e0e0e0")).
 			Render(
 				"🐠 bubblequarium 🐠\n\n" +
-					"F     - Add a fish\n" +
-					"R     - Remove a fish\n" +
-					"Space - Drop food\n" +
-					"P     - Pause/Resume\n" +
-					"Q     - Quit\n\n" +
+					"F       - Add a fish\n" +
+					"R       - Remove a fish\n" +
+					"Space   - Drop food\n" +
+					"P       - Pause/Resume\n" +
+					"Q       - Quit\n\n" +
+					"Submarine:\n" +
+					"Arrows / WASD / hjkl - Move (Shift = boost)\n" +
+					"C       - Cycle color\n" +
+					"Z       - Toggle headlight\n" +
+					"E       - Extend grabber arm\n" +
+					"T       - Toggle bubble trail\n" +
+					"X       - Honk horn (scatter fish)\n\n" +
 					"Fish are attracted to food!\n" +
 					"Press ? to close this help.",
 			)
