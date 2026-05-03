@@ -9,6 +9,7 @@ import (
 
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
+	"github.com/distatus/battery"
 )
 
 // Fish species with their art and colors
@@ -82,13 +83,16 @@ type FoodParticle struct {
 type tickMsg time.Time
 
 type model struct {
-	width, height int
-	fish          []Fish
-	bubbles       []Bubble
-	food          []FoodParticle
-	tick          int
-	paused        bool
-	showHelp      bool
+	width, height   int
+	fish            []Fish
+	bubbles         []Bubble
+	food            []FoodParticle
+	tick            int
+	paused          bool
+	showHelp        bool
+	hasBattery      bool
+	batteryPct      int
+	batteryCharging bool
 }
 
 // aquaHeight returns the number of rows available for the aquarium (excluding the status bar).
@@ -110,6 +114,26 @@ func initialModel() model {
 	for i := 0; i < 6; i++ {
 		m.fish = append(m.fish, newFish(m.width, m.aquaHeight()))
 	}
+	if b := firstUsableBattery(); b != nil {
+		m.hasBattery = true
+		m = m.refreshBattery(b)
+	}
+	return m
+}
+
+func firstUsableBattery() *battery.Battery {
+	bats, _ := battery.GetAll()
+	for _, b := range bats {
+		if b != nil && b.Full > 0 {
+			return b
+		}
+	}
+	return nil
+}
+
+func (m model) refreshBattery(b *battery.Battery) model {
+	m.batteryPct = int(100 * b.Current / b.Full)
+	m.batteryCharging = b.State.Raw == battery.Charging || b.State.Raw == battery.Full
 	return m
 }
 
@@ -177,6 +201,11 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case tickMsg:
 		if !m.paused {
 			m.tick++
+			if m.hasBattery && m.tick%300 == 0 {
+				if b := firstUsableBattery(); b != nil {
+					m = m.refreshBattery(b)
+				}
+			}
 			m = m.updateFish()
 			m = m.updateBubbles()
 			m = m.updateFood()
@@ -589,14 +618,25 @@ func (m model) View() string {
 	medDate := now.Format("Jan 2, 2006")
 	shortDate := now.Format("Jan 2")
 
+	var batRich, batMed, batMin string
+	if m.hasBattery {
+		icon := "🔋"
+		if m.batteryCharging {
+			icon = "🔌"
+		}
+		batRich = fmt.Sprintf("  %s %d%%", icon, m.batteryPct)
+		batMed = fmt.Sprintf("  bat %d%%", m.batteryPct)
+		batMin = fmt.Sprintf(" %d%%", m.batteryPct)
+	}
+
 	// Richest to most compact. The first that fits in m.width wins.
 	statusLine := pickStatusLine([]string{
-		fmt.Sprintf(" 🐟%d  🕐 %s  📅 %s  ?:❓", n, fullClock, fullDate),
-		fmt.Sprintf(" %d fish  %s  %s  ?", n, fullClock, fullDate),
-		fmt.Sprintf(" %d fish  %s  %s  ?", n, shortClock, medDate),
-		fmt.Sprintf(" %d fish  %s  %s  ?", n, shortClock, shortDate),
-		fmt.Sprintf(" %df  %s  %s  ?", n, shortClock, shortDate),
-		fmt.Sprintf(" %df %s ?", n, miniClock),
+		fmt.Sprintf(" 🐟%d%s  🕐 %s  📅 %s  ?:❓", n, batRich, fullClock, fullDate),
+		fmt.Sprintf(" %d fish%s  %s  %s  ?", n, batMed, fullClock, fullDate),
+		fmt.Sprintf(" %d fish%s  %s  %s  ?", n, batMed, shortClock, medDate),
+		fmt.Sprintf(" %d fish%s  %s  %s  ?", n, batMed, shortClock, shortDate),
+		fmt.Sprintf(" %df%s  %s  %s  ?", n, batMin, shortClock, shortDate),
+		fmt.Sprintf(" %df%s %s ?", n, batMin, miniClock),
 	}, m.width)
 	statusLine = fitToWidth(statusLine, m.width)
 
